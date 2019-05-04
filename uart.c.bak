@@ -1,0 +1,412 @@
+
+#include <stdio.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+#include  <pthread.h>
+
+#include <sys/ioctl.h>
+#include <sys/time.h>
+
+#include "crc/crc/crc16.h"
+
+const char *Serial_Dev = "/dev/ttyACM0";
+
+int S_fd;
+
+struct image_msg *global_image = NULL;
+struct qrcode_msg *global_qrcode = NULL;
+
+int scanner_open(int n)
+{
+    int fd;
+    int ret;
+    char scanner_dev[20] = {0};
+
+    sprintf(scanner_dev, "/dev/ttyACM%d", n);
+    fd = open(scanner_dev, O_RDWR |  O_NOCTTY);
+    if (fd < 0) {
+        if (n > 1000)
+            return fd;
+        return scanner_open(++n);
+    }
+    return fd;
+}
+
+static inline FILE * file_open()
+{
+	struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    char name[50];
+    sprintf(name, "./image_%d.jpg", tv.tv_sec*1000 + tv.tv_usec);
+    FILE *fp = fopen(name, "w+");
+    if (fp == NULL)
+        perror("fopen");
+
+    return fp;
+}
+
+static inline size_t file_write(void *ptr, size_t size, FILE *stream)
+{
+    return fwrite(ptr, 1, size, stream);
+    fflush(stream);
+}
+
+void file_close(FILE *stream)
+{
+    fflush(stream);
+    fclose(stream);
+}
+
+struct scanmsg {
+    uint16_t head; // pc: 0xAADD; device: 0xBBDD
+#define QRCODE_DATA  1
+#define IMAGE_DATA   2
+#define QRCODE_MODE  3
+#define IMAGE_MODE   4
+#define SLEEP        5
+#define WAKEUP       6
+    uint8_t type;
+    uint8_t id;
+    uint32_t len;
+    uint16_t crc;
+    uint8_t buffer[];
+} __attribute__((packed));
+
+struct barcode_msg {
+    uint8_t id;
+    uint8_t barcode[1024];
+    uint32_t size;
+};
+
+struct image_msg {
+    uint8_t id;
+    uint8_t image[1024*1024*5];
+    uint16_t crc;
+    uint32_t size;
+    uint32_t act_size;
+    uint8_t *pos;
+	struct timeval tv_start;
+	struct timeval tv_end;
+};
+
+struct image_msg *image_create(uint16_t crc, size_t size)
+{
+    struct image_msg * msg = (struct image_msg *)malloc(sizeof(struct image_msg));
+    memset(msg, '\0', sizeof(struct image_msg));
+    msg->pos = msg->image;
+    msg->size = size;
+    msg->crc = crc;
+    gettimeofday(&image->tv_start, NULL);
+    return msg;
+};
+
+void image_update(struct image_msg *image, uint8_t *buf, size_t len)
+{
+    memcpy(image->pos, buf, len);
+    image->pos += len;
+    image->act_size += len;
+    if (image->act_size == image->size) {
+        image_save(image);
+    }
+}
+
+int image_crc(struct image_msg *image)
+{
+    if (image->size != image->act_size) {
+        printf("image error\n");
+        return -1;
+    }
+    if (image->crc == crc16(image->image, image->size))
+        return 0;
+    return -1;
+}
+
+void image_save(struct image_msg *image)
+{
+    if (image->size != image->act_size) {
+        printf("image error\n");
+        return;
+    }
+    FILE *fp = file_open();
+    if (fp == NULL) {
+        printf("image create failed\n");
+        free((void *)image);
+        return;
+    }
+
+    file_write(image->image, image->size, fp);
+    free((void *)image);
+    file_close(fp);
+    global_image = NULL;
+    gettimeofday(&image->tv_end, NULL);
+
+    printf("image size: %uk, %u, timestamp: %ld ms \n", image->size /1024, image->size, (image->tv_end.tv_sec * 1000 + image->tv_end.tv_usec / 1000) - (image->tv_start.tv_sec * 1000 + image->tv_start.tv_usec / 1000));
+}
+
+int set_opt(int fd,int nSpeed,int nBits,char nEvent,int nStop);
+
+void * Pthread_Serial( void *arg )
+{
+    int n=0;
+    int ret;
+    struct termios oldstdio;
+    unsigned char Rx_Data[100];
+    unsigned char Rx_Data_old[100];
+    unsigned char *rbuf = Rx_Data;
+    char Tx_Data[50]={0};
+
+    S_fd = scanner_open(0);
+
+    if( -1==S_fd )
+        pthread_exit(NULL);
+
+    ret = set_opt(S_fd,115200,8,'N',1);
+    if(ret == -1)
+    {
+         pthread_exit(NULL);
+    }
+
+    size_t sum = 0;
+	struct timeval tv;
+	struct timeval ts;
+
+    size_t count = 0;
+	fd_set rdfs;
+
+            int s = 0;
+            int d = 0;
+    FILE *fp = NULL;
+
+
+    while(1)
+    {
+        ret = read( S_fd, rbuf, 100);
+#if 0
+        if (ret >0) {
+            count += ret;
+
+            if (ret > 3) {
+                struct scanmsg *msg = (struct scanmsg *)rbuf;
+                msg->head = ntohs(msg->head);
+                msg->len  = ntohl(msg->len);
+                msg->crc  = ntohl(msg->crc);
+                if (msg->head != 0xBBDD) {
+                    if (_global_image == NULL) {
+                        printf("unkonwn msg...\n");
+                        continue;
+                    } else
+                        image_update(global_image, rbuf, ret);
+                }
+                switch (msg->type) {
+                case QRCODE_DATA:
+                        if (ret < (sizeof(struct scanmsg) + msg->len))
+                            s = 1;
+                        msg->buffer[msg->len] = '\0';
+                        if (crc16(msb->buffer, msg->len) == msg->crc)
+                            printf("barcode: %s\n", msg->buffer);
+                        else
+                            printf("barcode error\n");
+                    break;
+                case QRCODE_MODE:
+                        printf("change mode to qrcode.\n");
+                    break;
+                case IMAGE_DATA:
+                    image = image_create(msg->crc, msg->len);
+                    image_update(global_image, msg->buffer, ret);
+                    if (global_image->size <= global_image->act_size)
+                        image_save(global_image);
+                    break;
+                case IMAGE_MODE:
+                        printf("change mode to image.\n");
+                    break;
+                case SLEEP:
+                        printf("scanner sleep.\n");
+                    break;
+                case WAKEUP:
+                        printf("scanner wakup.\n");
+                    break;
+                default:
+                    break;
+                }
+            }
+
+#else
+            if (1) {
+            //  BB DD 01 0C 32 39 30 36 30 36 31 32 34 33 36 38 FF
+                if (rbuf[0] == 0xbb && rbuf[1] == 0xdd && rbuf[2] == 0x01) {
+                    char *p = rbuf + 4;
+                    *(p + rbuf[3]) = '\0';
+                    printf("barcode: %s\n", p);
+                    continue;
+                }
+            }
+            if (0) {
+                printf("sum = %lu\n", count );
+                int i;
+                for (i = 0; i < ret; i++) {
+                     printf(" %02X", rbuf[i]);
+                }
+                printf("\n");
+            }
+            if ((rbuf[0] == 0xff) && (rbuf[1] == 0xd8)) {
+                count = ret;
+                if (fp) {
+                    file_close(fp);
+                }
+                fp = file_open();
+                s = 1;
+                d = 0;
+                gettimeofday(&tv, NULL);
+            }
+
+            if ((rbuf[ret - 2] == 0xff) && (rbuf[ret - 1] == 0xd9)) {
+            d = 1;
+            }
+
+
+            if (s == 1) {
+
+            size_t l = file_write(rbuf, ret, fp);
+                    fflush(fp);
+
+                if (d == 1) {
+                    fflush(fp);
+                    file_close(fp);
+                    fp = NULL;
+            gettimeofday(&ts, NULL);
+            /*printf("%ld.%ld \n", tv.tv_sec, tv.tv_usec / 1000);*/
+            printf("image size: %uk, %u, timestamp: %ld ms \n", count /1024, count, (ts.tv_sec * 1000 + ts.tv_usec / 1000) - (tv.tv_sec * 1000 + tv.tv_usec / 1000));
+
+                }
+            }
+#endif
+
+
+
+        }
+        else
+        {
+            usleep(100000);
+            sprintf( Tx_Data,"send %d\r\n", n++ );
+            //serial_send( S_fd, Tx_Data );
+            //printf("send ok%d\r\n",n++);
+        }
+    }
+    pthread_exit(NULL);
+}
+
+int main()
+{
+    pthread_t pthread_id;
+
+    //Create a thread
+    pthread_create( &pthread_id, NULL, &Pthread_Serial, NULL );
+    usleep(1000);
+
+    if( -1==S_fd )
+    {
+        printf("error: cannot open serial dev\r\n");
+        return -1;
+    }
+
+    while(1)
+    {
+        usleep(1000);
+    }
+
+    return 0;
+}
+
+int set_opt(int fd,int nSpeed,int nBits,char nEvent,int nStop)
+{
+    struct termios newtio,oldtio;
+    if(tcgetattr(fd,&oldtio)!=0)
+    {
+        perror("error:SetupSerial 3\n");
+        return -1;
+    }
+    bzero(&newtio,sizeof(newtio));
+    //使能串口接收
+    newtio.c_cflag |= CLOCAL | CREAD;
+    newtio.c_cflag &= ~CSIZE;
+
+    newtio.c_lflag &=~ICANON;//原始模式
+
+    //newtio.c_lflag |=ICANON; //标准模式
+
+    //设置串口数据位
+    switch(nBits)
+    {
+        case 7:
+            newtio.c_cflag |= CS7;
+            break;
+        case 8:
+            newtio.c_cflag |=CS8;
+            break;
+    }
+    //设置奇偶校验位
+    switch(nEvent)
+
+    {
+        case 'O':
+            newtio.c_cflag |= PARENB;
+            newtio.c_cflag |= PARODD;
+            newtio.c_iflag |= (INPCK | ISTRIP);
+            break;
+        case 'E':
+            newtio.c_iflag |= (INPCK | ISTRIP);
+            newtio.c_cflag |= PARENB;
+            newtio.c_cflag &= ~PARODD;
+            break;
+        case 'N':
+            newtio.c_cflag &=~PARENB;
+            break;
+    }
+    //设置串口波特率
+    switch(nSpeed)
+    {
+        case 2400:
+            cfsetispeed(&newtio,B2400);
+            cfsetospeed(&newtio,B2400);
+            break;
+        case 4800:
+            cfsetispeed(&newtio,B4800);
+            cfsetospeed(&newtio,B4800);
+            break;
+        case 9600:
+            cfsetispeed(&newtio,B9600);
+            cfsetospeed(&newtio,B9600);
+            break;
+        case 115200:
+            cfsetispeed(&newtio,B115200);
+            cfsetospeed(&newtio,B115200);
+            break;
+        case 460800:
+            cfsetispeed(&newtio,B460800);
+            cfsetospeed(&newtio,B460800);
+            break;
+        default:
+            cfsetispeed(&newtio,B9600);
+            cfsetospeed(&newtio,B9600);
+            break;
+    }
+    //设置停止位
+    if(nStop == 1)
+        newtio.c_cflag &= ~CSTOPB;
+    else if(nStop == 2)
+        newtio.c_cflag |= CSTOPB;
+    newtio.c_cc[VTIME] = 1;
+    newtio.c_cc[VMIN] = 0;
+    tcflush(fd,TCIFLUSH);
+
+    if(tcsetattr(fd,TCSANOW,&newtio)!=0)
+    {
+        perror("com set error\n");
+        return -1;
+    }
+    return 0;
+}

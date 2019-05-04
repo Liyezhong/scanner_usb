@@ -1,0 +1,112 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <linux/hidraw.h>
+#include <sys/ioctl.h>
+
+#include <sys/time.h>
+#define  DEVNAME "/dev/ttyACM"
+
+int scanner_open(int n)
+{
+    int fd;
+    int ret;
+    char scanner_dev[20] = {0};
+
+    sprintf(scanner_dev, "%s%d", DEVNAME, n);
+    fd = open(scanner_dev, O_RDWR);
+    if (fd < 0) {
+        if (n > 1000)
+            return fd;
+        return scanner_open(++n);
+    }
+    return fd;
+
+    struct hidraw_devinfo devinfo;
+
+    // get vid and pid
+    ret = ioctl(fd, HIDIOCGRAWINFO, &devinfo);
+
+    if (ret < 0) {
+        perror("HIDIOCGRAWINFO");
+        return -1;
+    }
+
+    if ((u_int16_t)devinfo.vendor == 0x0483 && (u_int16_t)devinfo.product == 0x5750) {
+        printf("Scanner: VID = %04X PID = %04X\n", (u_int16_t)devinfo.vendor, (u_int16_t)devinfo.product);
+        return fd;
+    }
+
+    close(fd);
+
+    return scanner_open(++n);
+}
+
+int main(int argc, char** argv)
+{
+    unsigned char rbuf[1024*1024*5];
+    int rxlen;
+    int fd;
+
+    fd = scanner_open(0);
+    if (fd < 0) {
+        printf("Can not Open Device.\n");
+        exit(1);
+    }
+
+	struct timeval tv;
+	struct timeval ts;
+
+    size_t count = 0;
+	fd_set rdfs;
+    int ret;
+
+	for (;;) {
+		FD_ZERO(&rdfs);
+        FD_SET(fd, &rdfs);
+        tv.tv_sec  = 0;
+        tv.tv_usec = 500000;
+
+		if ((ret = select(fd + 1, &rdfs, NULL, NULL, &tv)) < 0) {
+			perror("select");
+            break;
+		}
+
+        if (!ret) {
+            count = 0;
+            continue;
+        }
+
+        if (FD_ISSET(fd, &rdfs)) {
+            rxlen = read(fd, rbuf, sizeof(rbuf));
+            printf("\nsize: %u\n\n", rxlen);
+            if (count == 0) {
+                gettimeofday(&tv, NULL);
+                /*printf("%ld.%ld \n", tv.tv_sec, tv.tv_usec / 1000);*/
+            }
+            int i;
+            count+= rxlen;
+            if (1) {
+                printf("sum = %lu\n", count);
+                for (i = 0; i < rxlen; i++) {
+                     printf(" %02X", rbuf[i]);
+                }
+                printf("\n");
+            }
+#if 0
+        if (count >= 1024 * 1024 * 2 && b == 0) {
+            b = 1;
+
+            gettimeofday(&ts, NULL);
+            /*printf("%ld.%ld \n", tv.tv_sec, tv.tv_usec / 1000);*/
+            printf("timestamp: %ld ms \n", (ts.tv_sec * 1000 + ts.tv_usec / 1000) - (tv.tv_sec * 1000 + tv.tv_usec / 1000));
+        }
+#endif
+        }
+	}
+
+    close(fd);
+
+    return 0;
+}
