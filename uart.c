@@ -4,6 +4,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include  <pthread.h>
 
@@ -11,28 +12,29 @@
 
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <signal.h>
 
+#if 0
 #include "crc/crc/crc16.h"
+#endif
 
 const char *Serial_Dev = "/dev/ttyACM0";
 
-int fd;
 
 struct image_msg *global_image = NULL;
 struct qrcode_msg *global_qrcode = NULL;
 
-int scanner_open(int n)
+int scanner_open()
 {
     int fd;
-    int ret;
     char scanner_dev[20] = {0};
 
-    sprintf(scanner_dev, "/dev/ttyACM%d", n);
-    fd = open(scanner_dev, O_RDWR |  O_NOCTTY);
-    if (fd < 0) {
-        if (n > 1000)
-            return fd;
-        return scanner_open(++n);
+    for (int i = 0; i < 1000; i++) {
+        sprintf(scanner_dev, "/dev/ttyACM%d", i);
+        fd = open(scanner_dev, O_RDWR | O_NOCTTY | O_NDELAY);
+        printf("fd : %d\n", fd);
+        if (fd > 0)
+            break;
     }
     return fd;
 }
@@ -130,7 +132,7 @@ int image_crc(struct image_msg *image)
         return -1;
     }
 
-    uint16_t c = crc16(image->image, image->size);
+    uint16_t c /*= crc16(image->image, image->size) */;
     printf("image crc:　%X, msg_crc: %X\n", c, image->crc);
     if (image->crc == c)
         return 0;
@@ -163,26 +165,11 @@ void image_save(struct image_msg *image)
     printf("image size: %uk, %u, timestamp: %ld ms \n", image->size /1024, image->size, (image->tv_end.tv_sec * 1000 + image->tv_end.tv_usec / 1000) - (image->tv_start.tv_sec * 1000 + image->tv_start.tv_usec / 1000));
 }
 
-int set_opt(int fd,int nSpeed,int nBits,char nEvent,int nStop);
-
-void * Pthread_Serial()
+void scanner_handle(int fd)
 {
     int n=0;
     int ret;
-    struct termios oldstdio;
-    unsigned char Rx_Data[1024*1024*5];
-    unsigned char *rbuf = Rx_Data;
-
-    fd = scanner_open(0);
-
-    if( -1==fd )
-        exit(-1);
-
-    ret = set_opt(fd,115200,8,'N',1);
-    if(ret == -1)
-    {
-        exit(-1);
-    }
+    uint8_t buffer[1024*1024*5];
 
     size_t sum = 0;
 	struct timeval tv;
@@ -190,9 +177,6 @@ void * Pthread_Serial()
     size_t count = 0;
 	fd_set rdfs;
 
-    int flag = fcntl(fd, F_GETFL, 0);
-    flag |= O_NONBLOCK;
-    fcntl(fd, F_SETFL, flag);
 	for (;;) {
 		FD_ZERO(&rdfs);
         FD_SET(fd, &rdfs);
@@ -206,23 +190,27 @@ void * Pthread_Serial()
 
         if (ret == 0)
             continue;
-        ret = read( fd, rbuf, 1024*1024*5);
         if (FD_ISSET(fd, &rdfs)) {
 
+        ret = read(fd, buffer, 1024*1024*5);
+        if (ret == 0)
+            continue;
 
+            int len = ret;
             sum += len;
-            if (0) {
-                printf("len = %lu\n", ret);
+            if (1) {
+                printf("len = %d\n", ret);
                 int i;
                 for (i = 0; i < ret; i++) {
-                     printf(" %02X", rbuf[i]);
+                     printf(" %02X", buffer[i]);
                 }
                 printf("\n");
             }
+            continue;
 
 
             if (ret >= 3) {
-                struct scanmsg *msg = (struct scanmsg *)rbuf;
+                struct scanmsg *msg = (struct scanmsg *)buffer;
                 msg->head = ntohs(msg->head);
                 msg->len  = ntohl(msg->len);
                 msg->crc  = ntohs(msg->crc);
@@ -231,7 +219,7 @@ void * Pthread_Serial()
                         printf("unkonwn msg...\n");
                         continue;
                     } else {
-                        image_update(global_image, rbuf, ret);
+                        image_update(global_image, buffer, ret);
                         continue;
                     }
                 }
@@ -242,12 +230,14 @@ void * Pthread_Serial()
                             continue;
                     }
                         msg->buffer[msg->len] = '\0';
-                        uint16_t c = crc16(msg->buffer, msg->len);
+                        uint16_t c /*= crc16(msg->buffer, msg->len)*/;
                         printf("barcode crc:　%X, msg_crc: %X\n", c, msg->crc);
+                        #if 0
                         if (crc16(msg->buffer, msg->len) == msg->crc)
                             printf("barcode: %s\n", msg->buffer);
                         else
                             printf("barcode error, len: %u\n", msg->len);
+                        #endif
                     break;
                 case QRCODE_MODE:
                         printf("change mode to qrcode.\n");
@@ -278,100 +268,52 @@ void * Pthread_Serial()
     }
 }
 
-int main()
+int scanner_init(int fd)
 {
-    //Create a thread
-    Pthread_Serial();
+    struct termios tty;
+
+    memset(&tty, '\0', sizeof(tty));
+
+    cfsetispeed(&tty, B115200);
+    cfsetospeed(&tty, B115200);
+
+    tty.c_cflag |= CLOCAL | CREAD;
+    tty.c_lflag &= ~ICANON;
+    tty.c_cflag &= ~CSTOPB;
+    /*tty.c_cc[VTIME] = 1;*/
+    /*tty.c_cc[VMIN] = 0;*/
+
+    cfmakeraw(&tty);
+
+    tcflush(fd, TCIFLUSH);
+
+    if (tcsetattr(fd, TCSANOW, &tty)) {
+        perror("scanner set TCSANOW error");
+        return -1;
+    }
 
     return 0;
 }
 
-int set_opt(int fd,int nSpeed,int nBits,char nEvent,int nStop)
+void signal_handle(int signal_number)
 {
-    struct termios newtio,oldtio;
-    if(tcgetattr(fd,&oldtio)!=0)
-    {
-        perror("error:SetupSerial 3\n");
-        return -1;
-    }
-    bzero(&newtio,sizeof(newtio));
-    //使能串口接收
-    newtio.c_cflag |= CLOCAL | CREAD;
-    newtio.c_cflag &= ~CSIZE;
+    printf("signal: %d\n", signal_number);
+}
 
-    newtio.c_lflag &=~ICANON;//原始模式
+int main()
+{
+    int fd;
+    signal(SIGHUP, signal_handle);
 
-    //newtio.c_lflag |=ICANON; //标准模式
+    if ((fd = scanner_open()) < 0)
+        exit(-1);
 
-    //设置串口数据位
-    switch(nBits)
-    {
-        case 7:
-            newtio.c_cflag |= CS7;
-            break;
-        case 8:
-            newtio.c_cflag |=CS8;
-            break;
-    }
-    //设置奇偶校验位
-    switch(nEvent)
+    if (scanner_init(fd) < 0)
+        exit(-1);
 
-    {
-        case 'O':
-            newtio.c_cflag |= PARENB;
-            newtio.c_cflag |= PARODD;
-            newtio.c_iflag |= (INPCK | ISTRIP);
-            break;
-        case 'E':
-            newtio.c_iflag |= (INPCK | ISTRIP);
-            newtio.c_cflag |= PARENB;
-            newtio.c_cflag &= ~PARODD;
-            break;
-        case 'N':
-            newtio.c_cflag &=~PARENB;
-            break;
-    }
-    //设置串口波特率
-    switch(nSpeed)
-    {
-        case 2400:
-            cfsetispeed(&newtio,B2400);
-            cfsetospeed(&newtio,B2400);
-            break;
-        case 4800:
-            cfsetispeed(&newtio,B4800);
-            cfsetospeed(&newtio,B4800);
-            break;
-        case 9600:
-            cfsetispeed(&newtio,B9600);
-            cfsetospeed(&newtio,B9600);
-            break;
-        case 115200:
-            cfsetispeed(&newtio,B115200);
-            cfsetospeed(&newtio,B115200);
-            break;
-        case 460800:
-            cfsetispeed(&newtio,B460800);
-            cfsetospeed(&newtio,B460800);
-            break;
-        default:
-            cfsetispeed(&newtio,B9600);
-            cfsetospeed(&newtio,B9600);
-            break;
-    }
-    //设置停止位
-    if(nStop == 1)
-        newtio.c_cflag &= ~CSTOPB;
-    else if(nStop == 2)
-        newtio.c_cflag |= CSTOPB;
-    newtio.c_cc[VTIME] = 1;
-    newtio.c_cc[VMIN] = 0;
-    tcflush(fd, TCIFLUSH);
+    scanner_handle(fd);
 
-    if(tcsetattr(fd,TCSANOW,&newtio)!=0)
-    {
-        perror("com set error\n");
-        return -1;
-    }
+    close(fd);
+
     return 0;
 }
