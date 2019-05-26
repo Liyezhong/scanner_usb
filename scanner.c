@@ -1,4 +1,3 @@
-
 // author: arthur li
 
 #include <stdio.h>
@@ -71,11 +70,10 @@ struct image_msg {
 	struct timeval tv_end;
 };
 
-
 int scanner_open(struct scannerdev *scanner)
 {
     int fd;
-    char dev[20] = {0};
+    char dev[20];
 
     for (int i = 0; i < 1000; i++) {
         sprintf(dev, "/dev/ttyACM%d", i);
@@ -201,7 +199,7 @@ static int scanner_receive(struct scannerdev *scanner, void *msg, int len)
 }
 
 
-void scanner_handle(struct scannerdev *scanner)
+void scanner_message_handle(struct scannerdev *scanner)
 {
     int n=0;
     int ret;
@@ -341,32 +339,32 @@ void signal_handle(int signal_number)
     printf("signal: %d\n", signal_number);
 }
 
-#define PATTERN_CMP(a, b) strncasecmp(a, b, strlen(b))
+#define PATTERN_MATCH(a, b) !strncasecmp(a, b, strlen(b))
 
 void *scanner_cmd(void *args)
 {
 	struct scannerdev *scanner = (struct scannerdev *)args;
 	char cmd[100];
+    struct scannermsg msg;
+    msg.head = ntohs(0xAADD);
     for (;;) {
-		struct scannermsg msg;
-		msg.head = ntohs(0xAADD);
 		fgets(cmd, sizeof(cmd), stdin);
-		if (strlen(cmd) < 2)
+        if (cmd[0] == '\n')
 			continue;
-		if (!PATTERN_CMP(cmd, "scan")) {
+		if (PATTERN_MATCH(cmd, "scan")) {
 			msg.type = SCAN_MODE;
-		} else if (!PATTERN_CMP(cmd, "photo")) {
+		} else if (PATTERN_MATCH(cmd, "photo")) {
 			msg.type = PHOTO_MODE;
-		} else if (!PATTERN_CMP(cmd, "sleep")) {
+		} else if (PATTERN_MATCH(cmd, "sleep")) {
 			msg.type = SLEEP;
-		} else if (!PATTERN_CMP(cmd, "wakeup")) {
+		} else if (PATTERN_MATCH(cmd, "wakeup")) {
 			msg.type = WAKEUP;
-		} else if (!PATTERN_CMP(cmd, "lighton")) {
+		} else if (PATTERN_MATCH(cmd, "lighton")) {
 			msg.type = LIGHTON;
-		} else if (!PATTERN_CMP(cmd, "lightoff")) {
+		} else if (PATTERN_MATCH(cmd, "lightoff")) {
 			msg.type = LIGHTOFF;
 		} else {
-			printf("unkonwn cmd\n");
+			printf("unkonwn cmd: %s\n", cmd);
 			continue;
 		}
 
@@ -375,7 +373,7 @@ void *scanner_cmd(void *args)
 			exit(1);
 		}
 
-		printf("cmd: %s\n", cmd);
+		printf("cmd: %s \n", cmd);
 	}
 }
 
@@ -400,8 +398,10 @@ int main()
 		exit(-1);
      }
 
-    scanner_handle(&scanner);
+    scanner_message_handle(&scanner);
 
+    pthread_kill(thread, SIGKILL);
+    pthread_join(thread, NULL);
     scanner_close(&scanner);
 
     return 0;
