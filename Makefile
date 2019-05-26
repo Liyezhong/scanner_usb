@@ -1,2 +1,2 @@
 all:
-	$(CC) scanner.c -o scanner -pthread
+	$(CC) -g scanner.c -o scanner -pthread
