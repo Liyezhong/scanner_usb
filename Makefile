@@ -1,2 +1,2 @@
 all:
-	gcc uart.c -o uart -pthread
+	$(CC) scanner.c -o scanner -pthread
