@@ -1,2 +1,2 @@
 all:
-	gcc uart.c -o uart
+	gcc uart.c -o uart -pthread
